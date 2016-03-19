@@ -60,7 +60,7 @@ group.f <- factor(train$Survived, levels= c(1,0), labels = c("Yes", "No"))
 
 #Imputations valeurs manquantes KNN
   #Test (voisins dans base Train)
-knnimptest <- knnImputation(subset(test.clean, select = -c(PassengerId)),k=10,meth='median',
+knnimptest <- knnImputation(subset(test.clean, select = -c(PassengerId)),k=10,meth='mean',
                             distData=subset(train.clean, select = -c(PassengerId, Survived)))
 inspect <- as.numeric(knnimptest[is.na(test.clean[,'Age']),'Age']) #Verification imputation sur var. Age
 stat.desc(inspect)
@@ -256,6 +256,7 @@ train.clean <- disc.continue(data=train.clean,sl=0.05, pctl=20, var.todisc='Fare
 ##Decoupage en 4 classes, taux de survie croissant avec le montant, 93% de deces sur la tranche 0-7
 train.clean <- disc.continue(data=train.clean,sl=0.05, pctl=20, var.todisc='Age', target='Survived', id='PassengerId')
 ##Decoupage en 7 classes, pas de monotonie, taux de survie max sur <= 5 ans, min sur 18-21 et 22-32
+
 #Regroupement modalites var. discretes
 train.clean$SibSp.disc <- ifelse(train.clean$SibSp==0,'0',
                                  ifelse(train.clean$SibSp==1,'1',
@@ -297,7 +298,7 @@ Train.Sample$Survived_predNB <- predict(nb, Train.Sample)
 table(Train.Sample$Survived_predNB,Train.Sample$Survived, dnn = c("Predicted Class", "Observed Class"))
 error <- round(1 - sum(Train.Sample$Survived_predNB == Train.Sample$Survived) / length(Train.Sample$Survived),2)
 paste("Taux d'erreur NB - Apprentissage =",error,"%")
-##Erreur Train = 20%
+##Erreur Train = 22%
 
   #Validation sample
 Valid.Sample$Survived_predNB <- predict(nb, Valid.Sample)
@@ -305,20 +306,23 @@ Valid.Sample$Survived_predNB <- predict(nb, Valid.Sample)
 table(Valid.Sample$Survived_predNB,Valid.Sample$Survived, dnn = c("Predicted Class", "Observed Class"))
 error <- round(1 - sum(Valid.Sample$Survived_predNB == Valid.Sample$Survived) / length(Valid.Sample$Survived),2)
 paste("Taux d'erreur NB - Validation =",error,"%")
-##Erreur validation = 19%
+##Erreur validation = 20%
 
 
 #Adaboost
+  #BREIMAN & BOOTSTRAP = TRUE
 formula <- Survived ~ Pclass + Sex + SibSp + Parch + Fare + Age + Embarked
 vardep <- Train.Sample[ , as.character(formula[[2]])]
 cntrl <- rpart.control(maxdepth = 1, minsplit = 0, cp = -1) 
-mfinal <- 400
+mfinal <- 300
 boostingBreimanTrue <- boosting(formula = formula, data = Train.Sample, mfinal = mfinal, 
                           coeflearn = "Breiman", boos = TRUE, control = cntrl)
+barplot(sort(boostingBreimanTrue$importance, decreasing = TRUE), main = "Variables Relative Importance", 
+        col = "lightblue", horiz = TRUE, las = 1, cex.names = .6, xlim = c(0, 100))
 table(boostingBreimanTrue$class, vardep, dnn = c("Predicted Class", "Observed Class"))
 error <- round(1 - sum(boostingBreimanTrue$class == vardep) / length(vardep),2)
 paste("Taux d'erreur Boosting Breiman - Train =",error,"%")
-##Erreur Train = 19%
+##Erreur Train = 20%
 
 predboostBreiman <- predict.boosting(boostingBreimanTrue, newdata = Valid.Sample) 
 predboostBreiman$confusion
@@ -334,3 +338,99 @@ lines(errorevol.train[[1]], cex = 0.5, col = "blue", lty = 1, lwd = 2)
 legend("topright", c("test", "train"), col = c("red", "blue"), lty = 1, lwd = 2) 
 abline(h = min(errorevol.test[[1]]), col = "red", lty = 2, lwd = 2) 
 abline(h = min(errorevol.train[[1]]), col = "blue", lty = 2, lwd = 2)
+
+  #BREIMAN & BOOTSTRAP = FALSE
+boostingBreimanFalse <- boosting(formula = formula, data = Train.Sample, mfinal = mfinal, 
+                                coeflearn = "Breiman", boos = FALSE, control = cntrl)
+barplot(sort(boostingBreimanFalse$importance, decreasing = TRUE), main = "Variables Relative Importance", 
+        col = "lightblue", horiz = TRUE, las = 1, cex.names = .6, xlim = c(0, 100))
+table(boostingBreimanFalse$class, vardep, dnn = c("Predicted Class", "Observed Class"))
+error <- round(1 - sum(boostingBreimanFalse$class == vardep) / length(vardep),2)
+paste("Taux d'erreur Boosting Breiman - Train =",error,"%")
+##Erreur Train = 19%
+
+predboostBreiman <- predict.boosting(boostingBreimanFalse, newdata = Valid.Sample) 
+predboostBreiman$confusion
+predboostBreiman$error
+##Erreur Validation = 18%
+
+par(mfrow=c(1,1))
+errorevol.train <- errorevol(boostingBreimanFalse, Train.Sample) 
+errorevol.test <- errorevol(boostingBreimanFalse, Valid.Sample) 
+plot(errorevol.test[[1]], type = "l", ylim = c(0, 0.5), main = "Adaboost error versus number of trees", 
+     xlab = "Iterations",ylab = "Error", col = "red", lwd = 2) 
+lines(errorevol.train[[1]], cex = 0.5, col = "blue", lty = 1, lwd = 2) 
+legend("topright", c("test", "train"), col = c("red", "blue"), lty = 1, lwd = 2) 
+abline(h = min(errorevol.test[[1]]), col = "red", lty = 2, lwd = 2) 
+abline(h = min(errorevol.train[[1]]), col = "blue", lty = 2, lwd = 2)
+
+  #FREUND & BOOTSTRAP = TRUE
+boostingFreundTrue <- boosting(formula = formula, data = Train.Sample, mfinal = mfinal, 
+                                 coeflearn = "Freund", boos = TRUE, control = cntrl)
+barplot(sort(boostingFreundTrue$importance, decreasing = TRUE), main = "Variables Relative Importance", 
+        col = "lightblue", horiz = TRUE, las = 1, cex.names = .6, xlim = c(0, 100))
+table(boostingFreundTrue$class, vardep, dnn = c("Predicted Class", "Observed Class"))
+error <- round(1 - sum(boostingFreundTrue$class == vardep) / length(vardep),2)
+paste("Taux d'erreur Boosting Freund - Train =",error,"%")
+##Erreur Train = 19%
+
+predboostFreund <- predict.boosting(boostingFreundTrue, newdata = Valid.Sample) 
+predboostFreund$confusion
+predboostFreund$error
+##Erreur Validation = 20%
+
+par(mfrow=c(1,1))
+errorevol.train <- errorevol(boostingFreundTrue, Train.Sample) 
+errorevol.test <- errorevol(boostingFreundTrue, Valid.Sample) 
+plot(errorevol.test[[1]], type = "l", ylim = c(0, 0.5), main = "Adaboost error versus number of trees", 
+     xlab = "Iterations",ylab = "Error", col = "red", lwd = 2) 
+lines(errorevol.train[[1]], cex = 0.5, col = "blue", lty = 1, lwd = 2) 
+legend("topright", c("test", "train"), col = c("red", "blue"), lty = 1, lwd = 2) 
+abline(h = min(errorevol.test[[1]]), col = "red", lty = 2, lwd = 2) 
+abline(h = min(errorevol.train[[1]]), col = "blue", lty = 2, lwd = 2)
+
+
+  #FREUND & BOOTSTRAP = FALSE
+boostingFreundFalse <- boosting(formula = formula, data = Train.Sample, mfinal = mfinal, 
+                               coeflearn = "Freund", boos = FALSE, control = cntrl)
+barplot(sort(boostingFreundFalse$importance, decreasing = TRUE), main = "Variables Relative Importance", 
+        col = "lightblue", horiz = TRUE, las = 1, cex.names = .6, xlim = c(0, 100))
+table(boostingFreundFalse$class, vardep, dnn = c("Predicted Class", "Observed Class"))
+error <- round(1 - sum(boostingFreundTrue$class == vardep) / length(vardep),2)
+paste("Taux d'erreur Boosting Freund - Train =",error,"%")
+##Erreur Train = 19%
+
+predboostFreund <- predict.boosting(boostingFreundFalse, newdata = Valid.Sample) 
+predboostFreund$confusion
+predboostFreund$error
+##Erreur Validation = 17%
+
+par(mfrow=c(1,1))
+errorevol.train <- errorevol(boostingFreundFalse, Train.Sample) 
+errorevol.test <- errorevol(boostingFreundFalse, Valid.Sample) 
+plot(errorevol.test[[1]], type = "l", ylim = c(0, 0.5), main = "Adaboost error versus number of trees", 
+     xlab = "Iterations",ylab = "Error", col = "red", lwd = 2) 
+lines(errorevol.train[[1]], cex = 0.5, col = "blue", lty = 1, lwd = 2) 
+legend("topright", c("test", "train"), col = c("red", "blue"), lty = 1, lwd = 2) 
+abline(h = min(errorevol.test[[1]]), col = "red", lty = 2, lwd = 2) 
+abline(h = min(errorevol.train[[1]]), col = "blue", lty = 2, lwd = 2)
+
+#Prediction echantillon TEST : modele Adaboost + Freund + Bootstrap = FALSE
+test.clean$Pclass <- as.factor(test.clean$Pclass)
+test.clean$Parch.disc <- as.factor(test.clean$Parch.disc)
+test.clean$SibSp.disc <- as.factor(test.clean$SibSp.disc)
+test.clean$Sex <- as.factor(test.clean$Sex)
+test.clean$Embarked <- as.factor(test.clean$Embarked)
+
+predboostFreund <- predict.boosting(boostingFreundFalse, newdata = test.clean)
+test.clean <- cbind(test.clean,predboostFreund$class,predboostFreund$prob)
+test.clean <- rename(test.clean,c("predboostFreund$class" = "Pred_label"))
+Survived <- ifelse(test.clean$Pred_label=="No",0,1)
+
+#Fichier Submission
+submission <- data.frame(test.clean$PassengerId,Survived)
+submission <- rename(submission, c("test.clean.PassengerId"="PassengerId"))
+table(Survived)
+
+write.csv(submission, file = paste(chemin,"submission.csv"),row.names = FALSE)
+
