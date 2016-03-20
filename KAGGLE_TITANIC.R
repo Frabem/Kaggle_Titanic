@@ -14,6 +14,11 @@ library(tcltk)
 library(e1071)
 library(adabag)
 library(rpart)
+library(ggplot2)
+library(Rmisc)
+library(mice)
+library(randomForest)
+library(party)
 
 options(scipen=9) #Affichage ecriture scientifique
 
@@ -32,8 +37,19 @@ for(file in files)
 #Stats desc rapides
 summary(train)
 summary(test)
-## TRAIN : Valeurs manquantes sur Cabin / Age / Embarked
-## TEST : Valeurs manquantes sur Cabin / Age / Fare 
+
+# combine train and test set for feature transformations
+train$test_train <- 'train'
+test$test_train <- 'test'
+combined<-merge(train, test, all.x =T, all.y = T)
+# check the structure of the data
+str(combined)
+summary(combined)
+# the id, class, sur should be factors
+combined[,1]<-as.factor(combined[,1])
+combined[,2]<-as.factor(combined[,2])
+combined[,12]<-as.factor(combined[,12])
+
 
 #Stats miss par colonne
 miss.stat <- function(data=NULL,id=NULL){
@@ -47,38 +63,118 @@ miss.stat <- function(data=NULL,id=NULL){
   print(nb.na)
   
 }
-miss.stat(data = train, id = 'PassengerId')
-miss.stat(data = test, id = 'PassengerId')
-##Trop de valeurs manquantes pour Cabin
+miss.stat(data = combined, id = 'PassengerId')
 
-#Supprimer variables inutiles
-train.clean <- subset(train, select = -c(Name,Ticket,Cabin))
-test.clean <- subset(test, select = -c(Name,Ticket,Cabin))
+#the NA's for cabin and embarked are marked as empty values, change them to NA. 
+combined$Cabin[which(combined$Cabin == "")] <- NA
+combined$Embarked[which(combined$Embarked == "")] <- NA
+
+#Excat Position from Cabin number
+combined$CabinNum<-sapply(as.character(combined$Cabin),function(x) strsplit(x,'[A-Z]')[[1]][2])
+combined$num<-as.numeric(combined$CabinNum)
+num<-combined$num[!is.na(combined$num)]
+Pos<-kmeans(num,3)
+combined$CabinPos[!is.na(combined$num)]<-Pos$cluster
+combined$CabinPos<-factor(combined$CabinPos)
+levels(combined$CabinPos)<-c('Front','End','Middle')
+
+# check the specific cabin levels
+lvls<-levels(combined$Cabin)
+table(lvls)
+combined$Cabin<-as.character(combined$Cabin)
+Cabin.levels<-LETTERS[1:7]
+for(i in Cabin.levels){
+  combined$Cabin[grep(i, combined$Cabin)]<-i
+}
+combined$Cabin<-as.factor(combined$Cabin) 
+
+# check the structure now
+table(combined$Cabin)
+str(combined)
+
+# person titles, extracting unique titles from name
+combined$Title<-character(length = nrow(combined))
+titles<-c("Mr.","Mrs.","Miss","Master","Special") # special is for Dr., Capt., Major., etc.
+# replace all common titles
+for(i in titles[1:4]){
+  combined$Title[grep(i, combined$Name)] <- i
+}
+# replace others with all special titles
+combined$Title[which(combined$Title == "")] <- "Special"
+combined$Title<-factor(combined$Title, c("Mr.","Mrs.","Miss", "Master","Special"))
+table(combined$Title)
+
+# reorganize family features. family size = # of parent and child + # of sibings + 1
+combined$Fam_size<-combined$SibSp + combined$Parch + 1
+qplot(Fam_size, fill = Pclass, data = combined)
+
+#FamilyId2
+Surname<-sapply(as.character(combined$Name),function(x) strsplit(x,'[.,]')[[1]][1])
+FamilyId<-paste0(combined$Fam_size,Surname)
+combined$FamilyId<-factor(FamilyId)
+Family<-data.frame(table(FamilyId))
+SmallFamily<-Family$FamilyId[Family$Freq<=2]
+FamilyId[FamilyId %in% SmallFamily]<-'Small'
+combined$FamilyId2<-factor(FamilyId)
+
+#Imputation Fare
+fit.Fare<-rpart(Fare[!is.na(Fare)]~Pclass+Title+Sex+SibSp+Parch,data=combined[!is.na(combined$Fare),],
+                method='anova')
+# display the results
+printcp(fit.Fare) 
+predict(fit.Fare,combined[is.na(combined$Fare),])
+summary(combined$Fare)
+combined$Fare[is.na(combined$Fare)]<-predict(fit.Fare,combined[is.na(combined$Fare),])
+
+#Imputation Embarked
+table(combined$Embarked)
+combined$Embarked[is.na(combined$Embarked)]<-'S'
+
+#Imputation Age
+fit.Age<-rpart(Age[!is.na(Age)]~Pclass+Title+Sex+SibSp+Parch+Fare,data=combined[!is.na(combined$Age),],
+               method='anova')
+summary(predict(fit.Age,combined[is.na(combined$Age),]))
+summary(combined$Age)
+combined$Age[is.na(combined$Age)]<-predict(fit.Age,combined[is.na(combined$Age),])
+
+
+#Mother/Father/Child
+combined$Mother<-0
+combined$Mother[combined$Sex=='female' & combined$Parch>0 & combined$Age>18 & combined$Title!='Miss']<-1
+combined$Father<-0
+combined$Father[combined$Sex=='male' & combined$Parch>0 & combined$Age>18 & combined$Title!='Master']<-1
+combined$Child<-0
+combined$Child[combined$Parch>0 & combined$Age<=18]<-1
+
+#factorize the categorical variables
+combined<-transform(combined,
+                Pclass=factor(Pclass),
+                Sex=factor(Sex),
+                Embarked=factor(Embarked),
+                Title=factor(Title),
+                Mother=factor(Mother),
+                Father=factor(Father),
+                Child=factor(Child),
+                FamilyId2=factor(FamilyId2),
+                SibSp=factor(SibSp),
+                Parch=factor(Parch),
+                Cabin=factor(Cabin),
+                CabinPos=factor(CabinPos)
+)
+
+#split train/test data
+train<-combined[combined$test_train=='train',]
+test<-combined[combined$test_train=='test',]
+train$Survived<-factor(train$Survived)
 
 #Label cible
 group.f <- factor(train$Survived, levels= c(1,0), labels = c("Yes", "No"))
 
-#Imputations valeurs manquantes KNN
-  #Test (voisins dans base Train)
-knnimptest <- knnImputation(subset(test.clean, select = -c(PassengerId)),k=10,meth='mean',
-                            distData=subset(train.clean, select = -c(PassengerId, Survived)))
-inspect <- as.numeric(knnimptest[is.na(test.clean[,'Age']),'Age']) #Verification imputation sur var. Age
-stat.desc(inspect)
-stat.desc(test.clean$Age)
-test.clean <- cbind(subset(test.clean, select = -c(Age,Fare)),knnimptest$Age,knnimptest$Fare)
-test.clean <- rename(test.clean, c('knnimptest$Age' = 'Age','knnimptest$Fare'='Fare'))
-  #Train
-knnimptrain <- knnImputation(subset(train.clean, select = -c(PassengerId)),k=10,meth='median')
-inspect <- as.numeric(knnimptrain[is.na(train.clean[,'Age']),'Age']) #Verification imputation sur var. Age
-stat.desc(inspect)
-stat.desc(train.clean$Age)
-train.clean <- cbind(subset(train.clean, select = -c(Age,Embarked)),knnimptrain$Age,knnimptrain$Embarked)
-train.clean <- rename(train.clean, c('knnimptrain$Age' = 'Age','knnimptrain$Embarked'='Embarked'))
 
 #Stats descriptives sur var. continues
 
   #Scatterplot
-dta <- train.clean[,c('Fare','Age')] # get data
+dta <- train[,c('Fare','Age')] # get data
 dta.r <- abs(cor(dta)) # get correlations
 dta.col <- dmat.color(dta.r) # get colors
 # reorder variables so those with highest correlation
@@ -86,7 +182,6 @@ dta.col <- dmat.color(dta.r) # get colors
 dta.o <- order.single(dta.r)
 cpairs(dta, dta.o, panel.colors=dta.col, gap=.5,
        main="Variables Ordered and Colored by Correlation" ) 
-##Fare et Age peu correlees
 
   #Distribution univariee (Histogramme, QQPlot, Nuage de points)
 dist.plot <- function(data=NULL,var.name=NULL){
@@ -107,7 +202,7 @@ dist.plot <- function(data=NULL,var.name=NULL){
   abline(h=median(var,na.rm=T),lty=3)
 }
 
-  #Distribution bivariee (Boxplot, Violinplot, Densit?s Kernel) 
+  #Distribution bivariee (Boxplot, Violinplot, Densites Kernel) 
 dist.bivar.plot <- function(data=NULL,var.name=NULL,group.name='target'){
   
   dataset <- data
@@ -128,15 +223,12 @@ dist.bivar.plot <- function(data=NULL,var.name=NULL,group.name='target'){
                ylab=paste(group.name),xlab=paste(var.name)))
 }
 
-dist.plot(data=train.clean[,c('Fare','Age')],var.name='Fare')
-##Forte concentration sur 0-30, kurtosis, 3 obs à valeur elevee (=500) tirant fortement la moyenne (med=14,moy=30)
-dist.bivar.plot (data = train.clean[,c('Fare','Age','Survived')], var.name = 'Fare', group.name = 'Survived')
-##Peu discriminante, davantage de dispersion sur les passagers ayant survecu
+dist.plot(data=train[,c('Fare','Age')],var.name='Fare')
+dist.bivar.plot (data = train[,c('Fare','Age','Survived')], var.name = 'Fare', group.name = 'Survived')
 
-dist.plot(data=train.clean[,c('Fare','Age')],var.name='Age')
-##Repartition plus homogene, med = moy = 29 ans
-dist.bivar.plot (data = train.clean[,c('Fare','Age','Survived')], var.name = 'Age', group.name = 'Survived')
-##Discriminante, proba de survie meilleure sur les jeunes
+dist.plot(data=train[,c('Fare','Age')],var.name='Age')
+dist.bivar.plot (data = train[,c('Fare','Age','Survived')], var.name = 'Age', group.name = 'Survived')
+
 
 #Stats descriptives sur var. nominales/ordinales
 cross.bivar.plot <- function(data=NULL,var.name=NULL,group.name='target'){
@@ -160,162 +252,44 @@ cross.bivar.plot <- function(data=NULL,var.name=NULL,group.name='target'){
   par(mfrow=c(1,1))
 }
 
-cross.bivar.plot (data = train.clean[,c('Pclass','Sex','SibSp','Parch','Embarked','Survived')], 
-                  var.name = 'Survived', group.name = 'Survived')
-##Cible : 62% morts, 38% survivants
-cross.bivar.plot (data = train.clean[,c('Pclass','Sex','SibSp','Parch','Embarked','Survived')], 
-                  var.name = 'Pclass', group.name = 'Survived')
-##Tres discriminant : proba de survie forte sur classe 1, faible sur classe 3
-cross.bivar.plot (data = train.clean[,c('Pclass','Sex','SibSp','Parch','Embarked','Survived')], 
-                  var.name = 'Sex', group.name = 'Survived')
-##Tres discriminant : proba de survie forte sur femmes, faible sur hommes
-cross.bivar.plot (data = train.clean[,c('Pclass','Sex','SibSp','Parch','Embarked','Survived')], 
-                  var.name = 'SibSp', group.name = 'Survived')
-##Discriminant : 65% morts si aucune famille a bord, 46% si 1, autres modalites peu representees
-cross.bivar.plot (data = train.clean[,c('Pclass','Sex','SibSp','Parch','Embarked','Survived')], 
-                  var.name = 'Parch', group.name = 'Survived')
-##Discriminant : 65% morts si aucun partent/enfant a bord, 45% si 1-2, autres modalites peu representees
-cross.bivar.plot (data = train.clean[,c('Pclass','Sex','SibSp','Parch','Embarked','Survived')], 
-                  var.name = 'Embarked', group.name = 'Survived')
-##Meilleure proba de survie des passagers embarques a Cherbourg (19% de l'echantillon), 70% ont embarque a South Hampton
+train$Survived <- as.numeric(as.character(train$Survived)) #format numerique obligatoire
+cross.bivar.plot (data = train,var.name = 'Survived', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'Pclass', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'Sex', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'SibSp', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'Parch', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'Embarked', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'Mother', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'Father', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'Child', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'Title', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'Cabin', group.name = 'Survived')
+cross.bivar.plot (data = train, var.name = 'CabinPos', group.name = 'Survived')
 
-#Discretisation var. continues
-disc.continue <- function(data=NULL,sl=0.1,pctl=10,var.todisc=NULL,target=NULL,id=NULL) {
-  
-  dataset <- data
-  var.disc <- paste(var.todisc,'disc',sep='.') 
-  var.disc.label <- paste(var.disc,'label',sep='.')
-  
-  ##Nettoyage
-  if(paste(var.disc) %in% colnames(dataset))
-  {
-    dataset <- dataset[,!(names(dataset) %in% c(paste(var.disc)) )]
-  }
-  if(paste(var.disc.label) %in% colnames(dataset))
-  {
-    dataset <- dataset[,!(names(dataset) %in% c(paste(var.disc.label)) )]
-  }
-  
-  ##Decilage
-  evenbins <- function(x, bin.count=10, order=T) {
-    bin.size <- rep(length(x) %/% bin.count, bin.count)
-    bin.size <- bin.size + ifelse(1:bin.count <= length(x) %% bin.count, 1, 0)
-    bin <- rep(1:bin.count, bin.size)
-    if(order) {    
-      bin <- bin[rank(x,ties.method="random")]
-    }
-    return(factor(bin, levels=1:bin.count, ordered=order))
-  }
-  dataset$c1 <- evenbins(as.numeric(dataset[,var.todisc]), bin.count = pctl)
-  table(dataset$c1,dataset[,target])
-  prop.table(table(dataset$c1,dataset[,target]),1)
-  
-  ##ChiMerge
-  disc<-chiM(matrix(c(dataset$c1, dataset[,target]),ncol=2,dimnames=list(dataset[,id])),alpha = sl)
-  disc[[1]]
-  mat<-disc[[2]]
-  
-  ##Resultats de la discretisation
-  table(mat[,1],mat[,2])
-  t<-table(mat[,1],mat[,2])
-  freq<-table(mat[,1])
-  target.rate<-prop.table(t,1)[,2]
-  
-  ##Ajouter la variable discretisee dans le datasetframe + supprimer la variable decilee
-  dataset[,paste(var.disc)] <- mat[,1]
-  dataset<- subset(dataset, select =-c1)
-  
-  ##Ajouter le label dans le dataset
-  result.disc<-summaryBy(as.formula(sprintf("%s~%s", var.todisc, var.disc)), data = dataset, 	
-                         FUN = function(x) { c(min = min(x), max = max(x)) }, var.names = 'value')
-  result.disc[,paste(var.disc.label)]<-paste(var.todisc,'_','[',result.disc$value.min,';',result.disc$value.max,']',sep='')
-  result.disc<-result.disc[,c(paste(var.disc),paste(var.disc.label))]
-  dataset <- merge(dataset, result.disc, by.x = paste(var.disc), by.y = paste(var.disc), sort=F)
-  
-  dataset <- arrange(dataset,dataset[,id])
-  
-  ##Synthese discretisation
-  dataset$factor <- as.factor(dataset[,paste(var.disc.label)])
-  result=smbinning.factor(df=dataset,y=paste(target),x="factor")
-  print(paste("Discretisation ChiMerge :",var.todisc))
-  print(result$ivtable)
-  par(mfrow=c(2,2))
-  smbinning.plot(result,option="dist",sub=paste(var.todisc))
-  smbinning.plot(result,option="badrate",sub=paste(var.todisc))
-  #smbinning.plot(result,option="WoE",sub=paste(var.name))
-  par(mfrow=c(1,1))
-  dataset <- subset(dataset, select = -c(factor))
-  
-  output <- dataset
-  
-  return(output)
-}
-
-
-train.clean <- disc.continue(data=train.clean,sl=0.05, pctl=20, var.todisc='Fare', target='Survived', id='PassengerId')
-##Decoupage en 4 classes, taux de survie croissant avec le montant, 93% de deces sur la tranche 0-7
-train.clean <- disc.continue(data=train.clean,sl=0.05, pctl=20, var.todisc='Age', target='Survived', id='PassengerId')
-##Decoupage en 7 classes, pas de monotonie, taux de survie max sur <= 5 ans, min sur 18-21 et 22-32
-
-#Regroupement modalites var. discretes
-train.clean$SibSp.disc <- ifelse(train.clean$SibSp==0,'0',
-                                 ifelse(train.clean$SibSp==1,'1',
-                                        ifelse(train.clean$SibSp==2,'2','>2')))
-
-train.clean$Parch.disc <- ifelse(train.clean$Parch==0,'0',
-                                 ifelse(train.clean$Parch==1,'1',
-                                        ifelse(train.clean$Parch==2,'2','>2')))
-
-train.clean$Pclass <- as.factor(train.clean$Pclass)
-train.clean$Fare.disc.label <- as.factor(train.clean$Fare.disc.label)
-train.clean$Age.disc.label <- as.factor(train.clean$Age.disc.label)
-train.clean$Parch.disc <- as.factor(train.clean$Parch.disc)
-train.clean$SibSp.disc <- as.factor(train.clean$SibSp.disc)
-train.clean$Sex <- as.factor(train.clean$Sex)
-train.clean$Embarked <- as.factor(train.clean$Embarked)
 
 #Echantillons apprentissage (80%) / validation (20%)
+train$Survived <- factor(train$Survived) #obligatoire pour boosting
+
 set.seed(36)
-trainIndex <- sample.split(train.clean$Survived, SplitRatio=80/100)
+trainIndex <- sample.split(train$Survived, SplitRatio=80/100)
 
-Train.Sample <- train.clean[trainIndex,]
-Valid.Sample  <- train.clean[!trainIndex,]
+Train.Sample <- train[trainIndex,]
+Valid.Sample  <- train[!trainIndex,]
 
-prop.table(table(train.clean$Survived))
+prop.table(table(train$Survived))
 prop.table(table(Train.Sample$Survived))
 prop.table(table(Valid.Sample$Survived))
-
-#Classifieur Bayesien Naif
-
-  #Train sample
-Train.Sample$Survived <- factor(Train.Sample$Survived, levels= c(1,0), labels = c("Yes", "No"))
-Valid.Sample$Survived <- factor(Valid.Sample$Survived, levels= c(1,0), labels = c("Yes", "No"))
-
-nb <- naiveBayes(Survived ~ Fare.disc.label + Age.disc.label + Parch.disc + SibSp.disc + Sex + 
-                      Pclass + Embarked, data = Train.Sample)
-Train.Sample$Survived_predNB <- predict(nb, Train.Sample)
-
-table(Train.Sample$Survived_predNB,Train.Sample$Survived, dnn = c("Predicted Class", "Observed Class"))
-error <- round(1 - sum(Train.Sample$Survived_predNB == Train.Sample$Survived) / length(Train.Sample$Survived),2)
-paste("Taux d'erreur NB - Apprentissage =",error,"%")
-##Erreur Train = 22%
-
-  #Validation sample
-Valid.Sample$Survived_predNB <- predict(nb, Valid.Sample)
-
-table(Valid.Sample$Survived_predNB,Valid.Sample$Survived, dnn = c("Predicted Class", "Observed Class"))
-error <- round(1 - sum(Valid.Sample$Survived_predNB == Valid.Sample$Survived) / length(Valid.Sample$Survived),2)
-paste("Taux d'erreur NB - Validation =",error,"%")
-##Erreur validation = 20%
 
 
 #Adaboost
   #BREIMAN & BOOTSTRAP = TRUE
-formula <- Survived ~ Pclass + Sex + SibSp + Parch + Fare + Age + Embarked
+formula <- Survived ~ Age + Fare + Pclass + Sex + SibSp + Parch + Embarked + Mother + Father + Child + Title + Cabin + CabinPos
+formula <- Survived ~ Age + Fare + Pclass + Sex + SibSp + Parch + Embarked + Mother + Father + Child + Title + Cabin + CabinPos + FamilyId2 
 vardep <- Train.Sample[ , as.character(formula[[2]])]
 cntrl <- rpart.control(maxdepth = 1, minsplit = 0, cp = -1) 
-mfinal <- 300
-boostingBreimanTrue <- boosting(formula = formula, data = Train.Sample, mfinal = mfinal, 
+mfinal <- 150
+
+boostingBreimanTrue <- boosting(formula = Survived ~ Age, data = Train.Sample, mfinal = mfinal, 
                           coeflearn = "Breiman", boos = TRUE, control = cntrl)
 barplot(sort(boostingBreimanTrue$importance, decreasing = TRUE), main = "Variables Relative Importance", 
         col = "lightblue", horiz = TRUE, las = 1, cex.names = .6, xlim = c(0, 100))
@@ -347,7 +321,7 @@ barplot(sort(boostingBreimanFalse$importance, decreasing = TRUE), main = "Variab
 table(boostingBreimanFalse$class, vardep, dnn = c("Predicted Class", "Observed Class"))
 error <- round(1 - sum(boostingBreimanFalse$class == vardep) / length(vardep),2)
 paste("Taux d'erreur Boosting Breiman - Train =",error,"%")
-##Erreur Train = 19%
+##Erreur Train = 18%
 
 predboostBreiman <- predict.boosting(boostingBreimanFalse, newdata = Valid.Sample) 
 predboostBreiman$confusion
@@ -396,14 +370,14 @@ boostingFreundFalse <- boosting(formula = formula, data = Train.Sample, mfinal =
 barplot(sort(boostingFreundFalse$importance, decreasing = TRUE), main = "Variables Relative Importance", 
         col = "lightblue", horiz = TRUE, las = 1, cex.names = .6, xlim = c(0, 100))
 table(boostingFreundFalse$class, vardep, dnn = c("Predicted Class", "Observed Class"))
-error <- round(1 - sum(boostingFreundTrue$class == vardep) / length(vardep),2)
+error <- round(1 - sum(boostingFreundFalse$class == vardep) / length(vardep),2)
 paste("Taux d'erreur Boosting Freund - Train =",error,"%")
-##Erreur Train = 19%
+##Erreur Train = 16%
 
-predboostFreund <- predict.boosting(boostingFreundFalse, newdata = Valid.Sample) 
-predboostFreund$confusion
-predboostFreund$error
-##Erreur Validation = 17%
+predboostFreundFalse <- predict.boosting(boostingFreundFalse, newdata = Valid.Sample) 
+predboostFreundFalse$confusion
+predboostFreundFalse$error
+##Erreur Validation = 19%
 
 par(mfrow=c(1,1))
 errorevol.train <- errorevol(boostingFreundFalse, Train.Sample) 
@@ -415,22 +389,33 @@ legend("topright", c("test", "train"), col = c("red", "blue"), lty = 1, lwd = 2)
 abline(h = min(errorevol.test[[1]]), col = "red", lty = 2, lwd = 2) 
 abline(h = min(errorevol.train[[1]]), col = "blue", lty = 2, lwd = 2)
 
-#Prediction echantillon TEST : modele Adaboost + Freund + Bootstrap = FALSE
-test.clean$Pclass <- as.factor(test.clean$Pclass)
-test.clean$Parch.disc <- as.factor(test.clean$Parch.disc)
-test.clean$SibSp.disc <- as.factor(test.clean$SibSp.disc)
-test.clean$Sex <- as.factor(test.clean$Sex)
-test.clean$Embarked <- as.factor(test.clean$Embarked)
 
-predboostFreund <- predict.boosting(boostingFreundFalse, newdata = test.clean)
-test.clean <- cbind(test.clean,predboostFreund$class,predboostFreund$prob)
-test.clean <- rename(test.clean,c("predboostFreund$class" = "Pred_label"))
-Survived <- ifelse(test.clean$Pred_label=="No",0,1)
+
+#Prediction echantillon TEST : modele Adaboost + Freund + Bootstrap = FALSE
+boostingFreundFalse <- boosting(formula = formula, data = rbind(Train.Sample,Valid.Sample), mfinal = mfinal, 
+                                coeflearn = "Freund", boos = FALSE, control = cntrl)
+predboostFreund <- predict.boosting(boostingFreundFalse, newdata = test)
+test <- cbind(test,predboostFreund$class,predboostFreund$prob)
+test <- rename(test,c("predboostFreund$class" = "boostingFreundFalse.class"))
+Survived <- ifelse(test$boostingFreundFalse.class=="0",0,1)
+
 
 #Fichier Submission
-submission <- data.frame(test.clean$PassengerId,Survived)
-submission <- rename(submission, c("test.clean.PassengerId"="PassengerId"))
+submission <- data.frame(test$PassengerId,Survived)
+submission <- rename(submission, c("test.PassengerId"="PassengerId"))
 table(Survived)
 
 write.csv(submission, file = paste(chemin,"submission.csv"),row.names = FALSE)
 
+
+
+#cforest (conditional inference tree) method
+fit.cf<-cforest(Survived~FamilyId2+CabinPos+Pclass+Sex+Age+SibSp+Parch+Fare+Embarked+
+                  Title+Mother+Child,data=rbind(Train.Sample,Valid.Sample),
+                controls=cforest_unbiased(ntree=500, mtry=3))
+
+#write submission
+test$Survived<-as.numeric(as.character(predict(fit.cf,test,OOB=TRUE,type='response')))
+submission<-data.frame(test$PassengerId,test$Survived)
+submission <- rename(submission, c("test.PassengerId"="PassengerId","test.Survived"="Survived"))
+write.csv(submission,file = paste(chemin,"submission_cf.csv"),row.names = FALSE)
